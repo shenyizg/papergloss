@@ -98,6 +98,23 @@ export async function openSettings({ section } = {}) {
   let protocol = llm.protocol;
   let presetChanged = false;
 
+  // The server only ever sends the saved key to the server it was saved for.
+  const originOf = (proto, url) => {
+    try {
+      return new URL(url || (proto === 'anthropic' ? 'https://api.anthropic.com' : '')).origin;
+    } catch {
+      return '';
+    }
+  };
+  const endpointChanged = () => {
+    const origin = originOf(protocol, baseInput.value.trim());
+    return presetChanged || !origin || origin !== originOf(llm.protocol, llm.baseUrl);
+  };
+  const refreshKeyHint = () => {
+    keyHint.textContent = llm.hasKey && endpointChanged() ? t('settings.keyChanged') : t('settings.keyHint');
+  };
+  baseInput.addEventListener('input', refreshKeyHint);
+
   const showModelOptions = (models) => {
     modelPick.replaceChildren(h('option', { value: '', text: t('settings.pickModel', { n: models.length }) }), ...models.map((m) => h('option', { value: m, text: m })));
     modelPick.hidden = !models.length;
@@ -122,7 +139,7 @@ export async function openSettings({ section } = {}) {
     if (p.baseUrl || !p.id.startsWith('custom')) baseInput.value = p.baseUrl;
     modelInput.value = p.model || '';
     showModelOptions(p.models || []);
-    keyHint.textContent = presetChanged && llm.hasKey ? t('settings.keyChanged') : t('settings.keyHint');
+    refreshKeyHint();
     testResult.textContent = '';
     refreshProtocol();
   });
@@ -313,7 +330,7 @@ export async function openSettings({ section } = {}) {
       effort,
     };
     if (keyInput.value.trim()) llmPatch.apiKey = keyInput.value.trim();
-    else if (presetChanged) llmPatch.clearKey = true;
+    else if (endpointChanged()) llmPatch.clearKey = true;
     saveBtn.disabled = true;
     try {
       const saved = await api.saveSettings({

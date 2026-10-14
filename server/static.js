@@ -1,8 +1,8 @@
-import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { ROOT_DIR } from './config.js';
+import { sendFile } from './util.js';
 
 const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
 const NM = path.join(ROOT_DIR, 'node_modules');
@@ -132,10 +132,6 @@ export async function serveStatic(req, res, urlPath) {
 
   headers['Content-Length'] = stat.size;
   res.writeHead(200, headers);
-  if (req.method === 'HEAD') {
-    res.end();
-    return true;
-  }
-  fs.createReadStream(resolved.file).pipe(res);
+  sendFile(req, res, resolved.file);
   return true;
 }

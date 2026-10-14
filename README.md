@@ -38,7 +38,7 @@ npm install
 npm start
 ```
 
-Open <http://localhost:8787>. On first start the server prints a generated access password, which is also saved in `data/config.json`. Sign in, open **Settings**, choose a provider, paste your API key, pick a model, and tap **Test connection**.
+Open <http://localhost:8787>. On first start the server prints a generated access password; only a hash of it is stored, so note it down (see [Forgot the password?](#forgot-the-password)). Sign in, open **Settings**, choose a provider, paste your API key, pick a model, and tap **Test connection**.
 
 ## Configuration
 
@@ -50,8 +50,14 @@ Open <http://localhost:8787>. On first start the server prints a generated acces
 | `PAPERGLOSS_PASSWORD` | Set the access password from the environment (never written to disk) | — |
 | `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | Proxy for outbound requests (arXiv, model APIs), with the same rules as curl; `localhost` is always reached directly | — |
 | `PAPERGLOSS_NO_PROXY=1` | Ignore the proxy variables above | — |
+| `PAPERGLOSS_TRUST_PROXY=1` | Trust `X-Forwarded-*` headers from any peer, for a reverse proxy on another machine or in another container (by default only a proxy on the same machine is trusted) | — |
+| `PAPERGLOSS_ALLOW_PRIVATE_URLS=1` | Allow importing papers from this machine or the local network (blocked by default) | — |
 
 Everything else (provider, model, answer language, prompts, interface language) is set in the app.
+
+### Forgot the password?
+
+Stop the server, delete the `passwordHash` line from `data/config.json` and start it again: a new password is printed. Alternatively, set `PAPERGLOSS_PASSWORD`.
 
 ## Models
 
@@ -72,7 +78,7 @@ The answer language ("Translate into / answer in") is separate from the interfac
   }
   ```
 
-  and set `HOST=127.0.0.1` so only the proxy can reach it.
+  and set `HOST=127.0.0.1` so only the proxy can reach it. Other reverse proxies work too; keep the original `Host` header (Caddy does this by default, Apache needs `ProxyPreserveHost On`). If the proxy runs on another machine or in another container, set `PAPERGLOSS_TRUST_PROXY=1` so that the sign-in limit applies to each client instead of to the proxy.
 - In Safari, **Share → Add to Home Screen** opens it full screen like an app.
 
 ## Running as a service
@@ -105,14 +111,17 @@ If the server needs a proxy to reach arXiv or your model provider, add `Environm
 
 - Everything stays on your server under `data/`: PDFs, cached HTML, settings and conversations.
 - The model provider receives only what a request needs: the selected text with its surrounding paragraph and the paper's title and abstract; the full text when you ask about the whole paper; the image when you capture a region.
-- The API key is stored in `data/config.json` (file mode 600). The browser only ever sees a masked preview.
-- Access is protected by a password and an HttpOnly session cookie. Use HTTPS whenever the server is reachable beyond your own network.
+- The API key is stored in `data/config.json` (file mode 600). The browser only ever sees a masked preview, and the server only sends the key to the address it was saved for: switching providers or base URLs needs that provider's key.
+- Access is protected by a password, stored as an scrypt hash, and an HttpOnly session cookie. Sessions last 180 days and are renewed while you use the app; changing the password signs out every device. Sign-in attempts are limited to 10 per address per 10 minutes.
+- Requests from other sites, including other subdomains of your domain, can't change anything.
+- Paper links can't reach this machine or your local network (such as `127.0.0.1`, `192.168.x.x` or cloud metadata addresses), also not through redirects, unless `PAPERGLOSS_ALLOW_PRIVATE_URLS=1` is set.
+- Use HTTPS whenever the server is reachable beyond your own network.
 
 ## Data layout
 
 ```
 data/
-  config.json            access password, AI settings (including the API key)
+  config.json            access password hash, AI settings (including the API key)
   papers/<id>/
     meta.json            title, authors, abstract, reading position
     paper.pdf
@@ -142,9 +151,10 @@ server/            Node.js backend (no framework)
   net.js           proxy-aware fetch
 public/            frontend: plain ES modules, no build step
   assets/js/       reader.js, pdfview.js, htmlview.js, aipanel.js, ai.js (prompts), i18n.js, …
+test/              server tests (node:test)
 ```
 
-There is no build step: edit the files under `public/` and reload the page; restart the server after changing `server/`.
+There is no build step: edit the files under `public/` and reload the page; restart the server after changing `server/`. `npm test` runs the server tests.
 
 ## License
 

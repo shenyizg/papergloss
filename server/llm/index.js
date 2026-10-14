@@ -17,7 +17,13 @@ export function listModels(llm) {
 // server/i18n.js); null means "aborted by the client".
 export function describeLlmError(err, llm) {
   if (err?.name === 'AbortError') return null;
-  if (err instanceof LlmHttpError) return { status: err.status, key: err.key, params: err.params, code: err.code };
-  if (llm.protocol === 'anthropic') return describeAnthropicError(err);
-  return { status: 500, key: 'llm.unknown', params: { detail: err?.message } };
+  let info;
+  if (err instanceof LlmHttpError) info = { status: err.status, key: err.key, params: err.params, code: err.code };
+  else if (llm.protocol === 'anthropic') info = describeAnthropicError(err);
+  else info = { status: 500, key: 'llm.unknown', params: { detail: err?.message } };
+  // The saved key was held back from a new endpoint (see effectiveLlm); say so instead of "invalid key".
+  if (llm.keyWithheld && (info.status === 401 || info.code === 'no_key')) {
+    return { status: info.status, key: 'llm.keyForEndpoint', params: {}, code: 'no_key' };
+  }
+  return info;
 }

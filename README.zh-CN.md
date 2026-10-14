@@ -38,7 +38,7 @@ npm install
 npm start
 ```
 
-打开 <http://localhost:8787>。第一次启动时服务器会生成访问密码并打印出来，也会保存在 `data/config.json`。登录后打开**设置**，选服务商，填 API Key 和模型，再点**测试连接**。
+打开 <http://localhost:8787>。第一次启动时服务器会生成访问密码并打印出来。磁盘上只保存它的哈希，请记下来（忘了可以按[忘记密码](#忘记密码)重置）。登录后打开**设置**，选服务商，填 API Key 和模型，再点**测试连接**。
 
 ## 配置
 
@@ -50,8 +50,14 @@ npm start
 | `PAPERGLOSS_PASSWORD` | 用环境变量指定访问密码（不写入磁盘） | — |
 | `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | 访问 arXiv 和模型接口时走的代理，规则和 curl 一样；`localhost` 总是直连 | — |
 | `PAPERGLOSS_NO_PROXY=1` | 忽略上面的代理设置 | — |
+| `PAPERGLOSS_TRUST_PROXY=1` | 信任任何来源的 `X-Forwarded-*` 头，用于反向代理在另一台机器或另一个容器里的情况（默认只信任本机的反向代理） | — |
+| `PAPERGLOSS_ALLOW_PRIVATE_URLS=1` | 允许从本机或局域网地址导入论文（默认禁止） | — |
 
 其余设置（服务商、模型、回答语言、提示词、界面语言）都在网页里改。
+
+### 忘记密码
+
+停止服务，删掉 `data/config.json` 里的 `passwordHash` 那一行，再启动，会打印一个新密码。也可以用环境变量 `PAPERGLOSS_PASSWORD` 指定密码。
 
 ## 模型
 
@@ -72,7 +78,7 @@ npm start
   }
   ```
 
-  同时把 `HOST` 设成 `127.0.0.1`，只让反向代理访问。
+  同时把 `HOST` 设成 `127.0.0.1`，只让反向代理访问。其他反向代理也可以，注意保留原始的 `Host` 头（Caddy 默认如此，Apache 需要 `ProxyPreserveHost On`）。如果反向代理在另一台机器或另一个容器里，请设置 `PAPERGLOSS_TRUST_PROXY=1`，这样登录次数限制才会按每个访问者计算，而不是把所有人都算成代理的地址。
 - 在 Safari 里点**分享 → 添加到主屏幕**，就能像 App 一样全屏打开。
 
 ## 后台常驻
@@ -105,14 +111,17 @@ loginctl enable-linger $USER   # 退出登录后继续运行
 
 - 所有数据都在你自己服务器的 `data/` 目录里：PDF、网页版缓存、设置和问答记录。
 - 发给模型服务商的只有每次请求需要的内容：选中的文字和所在段落、论文标题和摘要；全文问答时是全文；框选截图时是那张图片。
-- API Key 保存在 `data/config.json`（文件权限 600），浏览器只能看到打码后的预览。
-- 访问需要密码，登录状态保存在 HttpOnly Cookie 里。服务器能被外网访问时请务必使用 HTTPS。
+- API Key 保存在 `data/config.json`（文件权限 600），浏览器只能看到打码后的预览。服务器只会把 Key 发给保存时的地址：换服务商或 Base URL 时需要填对应的 Key。
+- 访问需要密码，密码以 scrypt 哈希保存；登录状态保存在 HttpOnly Cookie 里，有效期 180 天，使用期间会自动续期；修改密码会让所有设备退出登录。每个地址 10 分钟内最多尝试登录 10 次。
+- 来自其他网站（包括同一域名下的其他子域名）的请求不能修改任何内容。
+- 导入论文的链接不能访问本机或局域网（比如 `127.0.0.1`、`192.168.x.x`、云服务器的元数据地址），跳转过去也不行，除非设置了 `PAPERGLOSS_ALLOW_PRIVATE_URLS=1`。
+- 服务器能被外网访问时请务必使用 HTTPS。
 
 ## 数据目录
 
 ```
 data/
-  config.json            访问密码、AI 设置（含 API Key）
+  config.json            访问密码的哈希、AI 设置（含 API Key）
   papers/<id>/
     meta.json            标题、作者、摘要、阅读位置
     paper.pdf
@@ -142,9 +151,10 @@ server/            Node.js 后端（无框架）
   net.js           支持代理的 fetch
 public/            前端：原生 ES 模块，无需构建
   assets/js/       reader.js、pdfview.js、htmlview.js、aipanel.js、ai.js（提示词）、i18n.js…
+test/              服务器端测试（node:test）
 ```
 
-不需要构建：改完 `public/` 里的文件刷新页面即可；改了 `server/` 需要重启服务。
+不需要构建：改完 `public/` 里的文件刷新页面即可；改了 `server/` 需要重启服务。`npm test` 运行服务器端测试。
 
 ## 许可证
 

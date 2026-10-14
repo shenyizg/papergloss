@@ -1,4 +1,5 @@
 // Reflowable reading view for arXiv's HTML rendering (LaTeXML output).
+import DOMPurify from '/vendor/dompurify/purify.es.mjs';
 import { api } from './api.js';
 import { h, local } from './ui.js';
 import { normalizeText } from './selection.js';
@@ -7,6 +8,21 @@ import { t } from './i18n.js';
 const DROP =
   'script, style, link, meta, iframe, frame, object, embed, form, input, button, textarea, select, noscript, template, ' +
   '.ltx_page_logo, .ltx_page_navbar, .ltx_page_footer, .ltx_TOC, .ltx_ERROR';
+
+// Papers are author-supplied content. A separate DOMPurify instance, because the
+// markdown renderer adds hooks to the shared one.
+const purifier = DOMPurify(window);
+const PURIFY = {
+  IN_PLACE: true,
+  USE_PROFILES: { html: true, svg: true, svgFilters: true, mathMl: true },
+  // TikZ pictures keep their labels (often with math) as HTML inside foreignObject. Allowing
+  // that is safe here: the tree is cleaned in place and cloned, never serialized and parsed
+  // again, which is where namespace tricks would bite.
+  ADD_TAGS: ['foreignObject'],
+  HTML_INTEGRATION_POINTS: { 'annotation-xml': true, foreignobject: true },
+  // alttext holds each formula's LaTeX.
+  ADD_ATTR: ['alttext'],
+};
 
 function nodeEl(node) {
   return node?.nodeType === 1 ? node : node?.parentElement || null;
@@ -52,6 +68,10 @@ function sameDocument(abs, base) {
 function sanitize(root, baseUrl, paperId) {
   const base = new URL(baseUrl);
   root.querySelectorAll(DROP).forEach((e) => e.remove());
+  // The LaTeX in <annotation> duplicates alttext, and DOMPurify would leave it behind as visible text.
+  root.querySelectorAll('annotation, annotation-xml').forEach((e) => e.remove());
+  purifier.sanitize(root, PURIFY);
+  // What's left is safe; point links and images at the right places.
   for (const el of [root, ...root.querySelectorAll('*')]) {
     for (const attr of [...el.attributes]) {
       const name = attr.name.toLowerCase();
@@ -107,6 +127,15 @@ function sanitize(root, baseUrl, paperId) {
   }
 }
 
+// Parses arXiv's HTML into nodes that are safe to put in the reader.
+export function prepareArticle(html, baseUrl, paperId) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const holder = doc.createElement('div');
+  holder.append(doc.querySelector('article.ltx_document') || doc.querySelector('.ltx_page_content') || doc.body);
+  sanitize(holder, baseUrl, paperId);
+  return [...holder.childNodes].map((node) => document.importNode(node, true));
+}
+
 export class HtmlView {
   constructor({ paper, host, onScroll, onTap, onPeek, onJump, onImage }) {
     Object.assign(this, { paper, host, onScroll, onTap, onPeek, onJump, onImage });
@@ -115,13 +144,10 @@ export class HtmlView {
 
   async open(saved) {
     const data = await api.getHtml(this.paper.id);
-    const doc = new DOMParser().parseFromString(data.html, 'text/html');
-    const article = doc.querySelector('article.ltx_document') || doc.querySelector('.ltx_page_content') || doc.body;
-    sanitize(article, data.baseUrl, this.paper.id);
     this.source = data.source;
     this.scrollEl = h('div', { class: 'html-scroll' });
     this.article = h('div', { class: 'html-article', lang: 'en' });
-    this.article.append(document.importNode(article, true));
+    this.article.append(...prepareArticle(data.html, data.baseUrl, this.paper.id));
     // Author blocks are "Name<br>Affiliation<br>email": keep only the name in bold.
     this.article.querySelectorAll('.ltx_authors .ltx_personname').forEach((pn) => {
       const br = pn.querySelector('br');

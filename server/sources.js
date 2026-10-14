@@ -3,9 +3,10 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import { HttpError, USER_AGENT, collapseWs, decodeEntities } from './util.js';
-import { httpFetch } from './net.js';
+import { privateAddressIn, publicFetch } from './net.js';
 
 const MAX_PDF_BYTES = 150 * 1024 * 1024;
+const MAX_ASSET_BYTES = 30 * 1024 * 1024;
 
 const NEW_ID_RE = /(\d{4}\.\d{4,5})(v\d+)?/;
 const OLD_ID_RE = /([a-z][a-z-]*(?:\.[a-z]{2})?\/\d{7})(v\d+)?/i;
@@ -53,7 +54,12 @@ export function parseInput(raw) {
     throw new HttpError(400, 'import.unrecognized');
   }
   const host = url.hostname.replace(/^www\./, '').toLowerCase();
-  const p = decodeURIComponent(url.pathname);
+  let p = url.pathname;
+  try {
+    p = decodeURIComponent(p);
+  } catch {
+    // keep it encoded
+  }
   const arxivLike =
     host === 'arxiv.org' ||
     host.endsWith('.arxiv.org') ||
@@ -78,16 +84,19 @@ export function parseInput(raw) {
   return { kind: 'url', url: url.toString() };
 }
 
+// Links here come from users and from the pages they point to, so everything goes through
+// publicFetch, which refuses local and private addresses (also after redirects).
 async function fetchRemote(url, { timeoutMs = 30000, accept } = {}) {
   let res;
   try {
-    res = await httpFetch(url, {
+    res = await publicFetch(url, {
       headers: { 'User-Agent': USER_AGENT, ...(accept ? { Accept: accept } : {}) },
-      redirect: 'follow',
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
     const host = new URL(url).hostname;
+    const blocked = privateAddressIn(err);
+    if (blocked) throw new HttpError(403, 'import.privateHost', { host: blocked.host });
     if (err.name === 'TimeoutError') throw retryable(new HttpError(502, 'net.timeout', { host }));
     throw retryable(new HttpError(502, 'net.unreachable', { host, reason: err.cause?.code || err.message }));
   }
@@ -168,9 +177,11 @@ function looksLikePdf(res) {
 }
 
 // Attribute values may be double-quoted, single-quoted or bare (e.g. ACL Anthology).
+// A name only starts after whitespace or a quote: without that, a long run of letters
+// makes the regex retry from every position, and one hostile page could stall the server.
 function attrsOf(tag) {
   const out = {};
-  const re = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
+  const re = /(?<=[\s"'])([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
   let m;
   while ((m = re.exec(tag))) out[m[1].toLowerCase()] = m[2] ?? m[3] ?? m[4] ?? '';
   return out;
@@ -178,7 +189,7 @@ function attrsOf(tag) {
 
 function parseMetaTags(html) {
   const out = new Map();
-  for (const tag of html.match(/<meta\s[^>]*>/gi) || []) {
+  for (const tag of (html.match(/<meta\s[^>]*>/gi) || []).slice(0, 2000)) {
     const attrs = attrsOf(tag);
     const name = (attrs.name || attrs.property || '').toLowerCase();
     const content = attrs.content;
@@ -189,7 +200,7 @@ function parseMetaTags(html) {
   return out;
 }
 
-function metaFromHtml(html) {
+export function metaFromHtml(html) {
   const tags = parseMetaTags(html);
   const first = (...names) => {
     for (const n of names) if (tags.get(n)?.[0]) return tags.get(n)[0];
@@ -333,12 +344,22 @@ export async function fetchOpenReviewMeta(id) {
   }
 }
 
-// Only files under the paper's own HTML location may be proxied.
+// Images and other files referenced by a paper's arXiv HTML (hosts are checked in papers.js).
 export async function fetchAsset(url) {
   const res = await fetchRemote(url, { timeoutMs: 30000, accept: 'image/*,*/*;q=0.5' });
   if (!res.ok) throw new HttpError(res.status === 404 ? 404 : 502, 'asset.failed', { status: res.status });
   const type = res.headers.get('content-type') || 'application/octet-stream';
-  const buf = Buffer.from(await res.arrayBuffer());
-  if (buf.length > 30 * 1024 * 1024) throw new HttpError(413, 'asset.tooLarge');
-  return { type, buf };
+  if (Number(res.headers.get('content-length') || 0) > MAX_ASSET_BYTES) {
+    await res.body?.cancel();
+    throw new HttpError(413, 'asset.tooLarge');
+  }
+  // Counted while reading, since the length header may be missing or wrong.
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of res.body ?? []) {
+    size += chunk.length;
+    if (size > MAX_ASSET_BYTES) throw new HttpError(413, 'asset.tooLarge');
+    chunks.push(chunk);
+  }
+  return { type, buf: Buffer.concat(chunks) };
 }

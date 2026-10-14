@@ -178,7 +178,13 @@ async function importUrl(url, { source, sourceId, idKey, lang }) {
   const tmp = newTmpPath();
   const pdf = await downloadPdfFromUrl(url, tmp);
   await finalizePdf(id, tmp);
-  const fallbackTitle = decodeURIComponent(new URL(pdf.finalUrl).pathname.split('/').pop() || '').replace(/\.pdf$/i, '');
+  let fallbackTitle = new URL(pdf.finalUrl).pathname.split('/').pop() || '';
+  try {
+    fallbackTitle = decodeURIComponent(fallbackTitle);
+  } catch {
+    // keep it encoded
+  }
+  fallbackTitle = fallbackTitle.replace(/\.pdf$/i, '');
   return saveMeta({
     id,
     source,

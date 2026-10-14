@@ -125,6 +125,8 @@ export class PdfView {
       wasmUrl: '/vendor/pdfjs/wasm/',
       iccUrl: '/vendor/pdfjs/iccs/',
       enableXfa: false,
+      // Font programs are compiled without eval (the CSP forbids it anyway).
+      isEvalSupported: false,
     });
     task.onProgress = ({ loaded, total }) => {
       if (total) this.onProgress?.(loaded / total);

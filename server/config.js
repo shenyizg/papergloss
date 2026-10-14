@@ -33,6 +33,8 @@ export const DEFAULT_PREFS = {
 };
 
 let config = null;
+// The hash kept on disk. With PAPERGLOSS_PASSWORD set, the one in use lives only in memory.
+let storedHash = '';
 
 function normalize(raw = {}) {
   const llm = { ...DEFAULT_LLM, ...(raw.llm || {}) };
@@ -41,21 +43,49 @@ function normalize(raw = {}) {
   prefs.prompts = { ...DEFAULT_PREFS.prompts, ...(raw.prefs?.prompts || {}) };
   return {
     secret: raw.secret || crypto.randomBytes(32).toString('hex'),
-    password: raw.password || '',
+    passwordHash: raw.passwordHash || '',
     llm,
     prefs,
   };
 }
 
+// ---- access password: stored as an scrypt hash -----------------------------------------
+
+const SCRYPT = { N: 16384, r: 8, p: 1 };
+
+function scrypt(password, salt, keylen, opts) {
+  return new Promise((resolve, reject) => {
+    crypto.scrypt(String(password).normalize('NFC'), salt, keylen, opts, (err, key) => (err ? reject(err) : resolve(key)));
+  });
+}
+
+async function hashPassword(password, salt = crypto.randomBytes(16)) {
+  const key = await scrypt(password, salt, 32, SCRYPT);
+  return ['scrypt', SCRYPT.N, SCRYPT.r, SCRYPT.p, salt.toString('base64'), key.toString('base64')].join('$');
+}
+
+export async function verifyPassword(password) {
+  const [kind, N, r, p, salt, hash] = String(config.passwordHash).split('$');
+  const expected = Buffer.from(hash || '', 'base64');
+  if (kind !== 'scrypt' || expected.length < 16) return false;
+  const key = await scrypt(password, Buffer.from(salt, 'base64'), expected.length, { N: Number(N), r: Number(r), p: Number(p) });
+  return crypto.timingSafeEqual(key, expected);
+}
+
 export async function loadConfig() {
   const raw = await readJsonFile(CONFIG_FILE, {});
   config = normalize(raw);
+  // Older versions kept the password itself; it keeps working, stored as a hash from now on.
+  if (!config.passwordHash && raw.password) config.passwordHash = await hashPassword(raw.password);
+  storedHash = config.passwordHash;
   let generatedPassword = null;
   if (process.env.PAPERGLOSS_PASSWORD) {
-    config.password = process.env.PAPERGLOSS_PASSWORD;
-  } else if (!config.password) {
+    // A salt derived from the secret keeps the hash, and so every session, stable across restarts.
+    const salt = crypto.createHmac('sha256', config.secret).update('env-password').digest().subarray(0, 16);
+    config.passwordHash = await hashPassword(process.env.PAPERGLOSS_PASSWORD, salt);
+  } else if (!config.passwordHash) {
     generatedPassword = randomId(10);
-    config.password = generatedPassword;
+    config.passwordHash = storedHash = await hashPassword(generatedPassword);
   }
   await saveConfig();
   return { config, generatedPassword };
@@ -66,13 +96,8 @@ export function getConfig() {
 }
 
 export async function saveConfig() {
-  // An env-provided password is never written back to disk.
-  const toSave = { ...config };
-  if (process.env.PAPERGLOSS_PASSWORD) {
-    const onDisk = await readJsonFile(CONFIG_FILE, {});
-    toSave.password = onDisk.password || '';
-  }
-  // Holds the access password and the API key: owner-only.
+  // Holds the API key: owner-only. An env-provided password is never written, not even hashed.
+  const toSave = { secret: config.secret, passwordHash: storedHash, llm: config.llm, prefs: config.prefs };
   await writeJsonFile(CONFIG_FILE, toSave, { mode: 0o600 });
 }
 
@@ -93,15 +118,33 @@ export function publicSettings() {
 
 const EFFORTS = new Set(['auto', 'low', 'medium', 'high', 'xhigh', 'max']);
 
+const normalizeBaseUrl = (url) => url.trim().replace(/\/+$/, '');
+
+// A saved API key belongs to the server it was saved for (scheme, host and port).
+function endpointOrigin(protocol, baseUrl) {
+  try {
+    return new URL(baseUrl || (protocol === 'anthropic' ? DEFAULT_LLM.baseUrl : '')).origin;
+  } catch {
+    return '';
+  }
+}
+
+function sameEndpoint(a, b) {
+  const origin = endpointOrigin(a.protocol, a.baseUrl);
+  return !!origin && origin === endpointOrigin(b.protocol, b.baseUrl);
+}
+
 export async function updateSettings(patch = {}) {
   if (patch.llm) {
     const l = patch.llm;
     const llm = config.llm;
+    const before = { protocol: llm.protocol, baseUrl: llm.baseUrl };
     if (typeof l.protocol === 'string' && ['anthropic', 'openai'].includes(l.protocol)) llm.protocol = l.protocol;
     if (typeof l.preset === 'string') llm.preset = l.preset.slice(0, 40);
-    if (typeof l.baseUrl === 'string') llm.baseUrl = l.baseUrl.trim().replace(/\/+$/, '');
+    if (typeof l.baseUrl === 'string') llm.baseUrl = normalizeBaseUrl(l.baseUrl);
     if (typeof l.model === 'string') llm.model = l.model.trim();
     if (typeof l.apiKey === 'string' && l.apiKey.trim()) llm.apiKey = l.apiKey.trim();
+    else if (!sameEndpoint(before, llm)) llm.apiKey = '';
     if (l.clearKey === true) llm.apiKey = '';
     if ('temperature' in l) {
       const t = l.temperature === '' || l.temperature === null ? null : Number(l.temperature);
@@ -137,7 +180,7 @@ export async function updateSettings(patch = {}) {
 }
 
 export async function setPassword(newPassword) {
-  config.password = newPassword;
+  config.passwordHash = storedHash = await hashPassword(newPassword);
   await saveConfig();
 }
 
@@ -147,8 +190,14 @@ export function effectiveLlm(override) {
   const base = { ...config.llm, effort: { ...config.llm.effort } };
   if (!override) return base;
   if (override.protocol === 'anthropic' || override.protocol === 'openai') base.protocol = override.protocol;
-  if (typeof override.baseUrl === 'string') base.baseUrl = override.baseUrl.trim().replace(/\/+$/, '');
+  if (typeof override.baseUrl === 'string') base.baseUrl = normalizeBaseUrl(override.baseUrl);
   if (typeof override.model === 'string' && override.model.trim()) base.model = override.model.trim();
-  if (typeof override.apiKey === 'string' && override.apiKey.trim()) base.apiKey = override.apiKey.trim();
+  if (typeof override.apiKey === 'string' && override.apiKey.trim()) {
+    base.apiKey = override.apiKey.trim();
+  } else if (!sameEndpoint(base, config.llm)) {
+    // Never send the saved key to a server the user is only trying out.
+    base.apiKey = '';
+    base.keyWithheld = !!config.llm.apiKey;
+  }
   return base;
 }

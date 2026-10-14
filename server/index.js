@@ -1,12 +1,11 @@
-import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { DATA_DIR, PAPERS_DIR, TMP_DIR, effectiveLlm, loadConfig, publicSettings, updateSettings } from './config.js';
-import { changePassword, isAuthed, login, logout, requireAuth } from './auth.js';
+import { changePassword, checkSession, forwardedHeader, login, logout, requireAuth } from './auth.js';
 import { serveStatic } from './static.js';
-import { HttpError, readJson, sendError, sendJson } from './util.js';
+import { HttpError, readJson, sendError, sendFile, sendJson } from './util.js';
 import * as papers from './papers.js';
 import { describeLlmError, listModels, streamChat } from './llm/index.js';
 import { proxyDescription } from './net.js';
@@ -27,14 +26,14 @@ function route(method, pattern, handler, { auth = true } = {}) {
 
 // ---- session & settings ---------------------------------------------------------------
 
-route('GET', '/api/session', (req, res) => sendJson(req, res, 200, { authed: isAuthed(req) }), { auth: false });
+route('GET', '/api/session', (req, res) => sendJson(req, res, 200, { authed: checkSession(req, res) }), { auth: false });
 
 route(
   'POST',
   '/api/login',
   async (req, res) => {
     const body = await readJson(req);
-    login(req, res, body.password);
+    await login(req, res, body.password);
     sendJson(req, res, 200, { ok: true });
   },
   { auth: false },
@@ -253,12 +252,11 @@ route('GET', '/api/papers/:id/pdf', async (req, res, { params, query }) => {
       return;
     }
     res.writeHead(206, { ...headers, 'Content-Range': `bytes ${start}-${end}/${stat.size}`, 'Content-Length': end - start + 1 });
-    if (req.method === 'HEAD') return res.end();
-    fs.createReadStream(file, { start, end }).pipe(res);
+    sendFile(req, res, file, { start, end });
     return;
   }
   res.writeHead(200, { ...headers, 'Content-Length': stat.size });
-  fs.createReadStream(file).pipe(res);
+  sendFile(req, res, file);
 });
 
 route('GET', '/api/papers/:id/html', async (req, res, { params }) => {
@@ -278,7 +276,7 @@ route('GET', '/api/papers/:id/asset', async (req, res, { params, query }) => {
     // Proxied files (SVG in particular) must never run script in this origin.
     'Content-Security-Policy': "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'",
   });
-  fs.createReadStream(file).pipe(res);
+  sendFile(req, res, file);
 });
 
 route('GET', '/api/papers/:id/threads', async (req, res, { params }) => {
@@ -301,6 +299,21 @@ route('DELETE', '/api/papers/:id/threads/:tid', async (req, res, { params }) => 
 
 // ---- server -----------------------------------------------------------------------------------
 
+// Pages on other sites, including other subdomains of the same site, may not change anything
+// here. Browsers label such requests with Sec-Fetch-Site; older ones still send Origin.
+function crossSite(req) {
+  const site = req.headers['sec-fetch-site'];
+  if (site) return site !== 'same-origin' && site !== 'none';
+  const origin = req.headers.origin;
+  if (!origin) return false;
+  try {
+    const { host } = new URL(origin);
+    return host !== req.headers.host && host !== forwardedHeader(req, 'x-forwarded-host');
+  } catch {
+    return true;
+  }
+}
+
 async function handle(req, res) {
   let url;
   try {
@@ -310,6 +323,7 @@ async function handle(req, res) {
   }
   const pathname = url.pathname;
   if (pathname.startsWith('/api/')) {
+    if (req.method !== 'GET' && req.method !== 'HEAD' && crossSite(req)) throw new HttpError(403, 'common.crossSite');
     for (const r of routes) {
       if (r.method !== req.method && !(r.method === 'GET' && req.method === 'HEAD')) continue;
       const m = r.re.exec(pathname);
@@ -365,11 +379,12 @@ const server = http.createServer((req, res) => {
 // Large uploads over mobile networks can take a while.
 server.requestTimeout = 30 * 60 * 1000;
 server.listen(PORT, HOST, () => {
+  const { port } = server.address();
   console.log(`PaperGloss is running (data: ${DATA_DIR}; outbound: ${proxyDescription()})`);
-  console.log(`  Local: http://127.0.0.1:${PORT}`);
-  if (HOST === '0.0.0.0') for (const ip of lanAddresses()) console.log(`  LAN:   http://${ip}:${PORT}`);
+  console.log(`  Local: http://127.0.0.1:${port}`);
+  if (HOST === '0.0.0.0') for (const ip of lanAddresses()) console.log(`  LAN:   http://${ip}:${port}`);
   if (generatedPassword) {
-    console.log(`  Generated access password: ${generatedPassword} (stored in data/config.json; change it in Settings)`);
+    console.log(`  Generated access password: ${generatedPassword} (shown only this once; change it in Settings)`);
   }
 });
 
