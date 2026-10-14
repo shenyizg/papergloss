@@ -1,0 +1,42 @@
+{
+  "name": "papergloss",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A web-based, AI-powered paper reader built for mobile: select text to translate it, explain it, or ask your own LLM",
+  "keywords": [
+    "paper-reader",
+    "arxiv",
+    "pdf",
+    "llm",
+    "translation",
+    "self-hosted",
+    "pwa",
+    "claude",
+    "openai-compatible"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/shenyizg/papergloss#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shenyizg/papergloss.git"
+  },
+  "bugs": {
+    "url": "https://github.com/shenyizg/papergloss/issues"
+  },
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.129.0",
+    "dompurify": "3.4.16",
+    "katex": "0.18.9",
+    "marked": "18.0.14",
+    "pdfjs-dist": "6.3.289",
+    "undici": "7.29.1"
+  }
+}
