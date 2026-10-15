@@ -16,13 +16,14 @@ PaperGloss is a self-hosted web app for reading research papers in any browser, 
 - **Two reading modes.**
   - **HTML** (arXiv papers): arXiv's own HTML rendering, reflowed to the screen width, with real math (MathML). Text size and font are adjustable.
   - **PDF**: the original layout. Pinch to zoom; double-tap a column to zoom to its width, double-tap again to reset; outline and page jump.
-- **Select to translate, explain or ask.** Long-press any text and pick an action. The surrounding paragraph goes along as context, formulas from the HTML version are sent as LaTeX, and a single word gets a dictionary-style entry.
+- **Select to translate, explain or ask.** Long-press any text and pick an action. The surrounding paragraph goes along as context, formulas from the HTML version are sent as LaTeX, and a single word gets a dictionary-style entry. With **Translate on select** turned on (in the ⋯ menu), a popup streams the translation as soon as you select text.
 - **Region capture** (PDF mode): drag a box around a formula, figure or table and ask a vision-capable model about it.
 - **Follow-up questions.** Every selection becomes a small conversation; "Back to source" jumps to where it came from.
 - **Ask about the whole paper**, with the full text as context.
 - **Reference previews.** Tapping a citation, figure reference or footnote opens a preview card instead of jumping away.
 - **History.** Conversations are stored per paper on the server, so they follow you across devices.
-- **Bring your own model.** Anthropic (through the official SDK) or any OpenAI-compatible API: OpenAI, DeepSeek, Gemini, Qwen, Kimi, GLM, SiliconFlow, OpenRouter, Ollama, or a relay.
+- **Bring your own model.** Anthropic (through the official SDK) or any OpenAI-compatible API: OpenAI, DeepSeek, Gemini, Qwen, Kimi, GLM, SiliconFlow, OpenRouter, Ollama, or a relay. Keys for several providers can be saved at once; if one is down, switch to another from the reader or straight from the error message.
+- Contents that can be pinned beside the text on wider screens (tablets, computers, phones in landscape), and a toolbar that can stay visible.
 - English and Chinese interface, dark mode, reading position saved, installable to the home screen.
 
 ![Desktop layout with the AI panel docked on the right](docs/screenshots/desktop-en.png)
@@ -111,7 +112,7 @@ If the server needs a proxy to reach arXiv or your model provider, add `Environm
 
 - Everything stays on your server under `data/`: PDFs, cached HTML, settings and conversations.
 - The model provider receives only what a request needs: the selected text with its surrounding paragraph and the paper's title and abstract; the full text when you ask about the whole paper; the image when you capture a region.
-- The API key is stored in `data/config.json` (file mode 600). The browser only ever sees a masked preview, and the server only sends the key to the address it was saved for: switching providers or base URLs needs that provider's key.
+- API keys are stored in `data/config.json` (file mode 600), one per provider. The browser only ever sees a masked preview, and the server only sends each key to the address it was saved for: pointing a provider at another server drops its key.
 - Access is protected by a password, stored as an scrypt hash, and an HttpOnly session cookie. Sessions last 180 days and are renewed while you use the app; changing the password signs out every device. Sign-in attempts are limited to 10 per address per 10 minutes.
 - Requests from other sites, including other subdomains of your domain, can't change anything.
 - Paper links can't reach this machine or your local network (such as `127.0.0.1`, `192.168.x.x` or cloud metadata addresses), also not through redirects, unless `PAPERGLOSS_ALLOW_PRIVATE_URLS=1` is set.

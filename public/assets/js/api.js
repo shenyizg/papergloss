@@ -153,3 +153,7 @@ export async function getSettings(force = false) {
 export function setSettingsCache(s) {
   settingsCache = s;
 }
+// The last settings seen, for code that can't wait (may be null before the first load).
+export function cachedSettings() {
+  return settingsCache;
+}

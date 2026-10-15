@@ -1,31 +1,9 @@
 import { api, getSettings, setSettingsCache } from './api.js';
 import { icon } from './icons.js';
-import { applyTheme, h, iconButton, local, toast } from './ui.js';
+import { PRESETS, presetLabel } from './providers.js';
+import { applyTheme, confirmDialog, h, iconButton, local, toast } from './ui.js';
 import { LANGS as UI_LANGS, getLang, setLang, t } from './i18n.js';
 
-export const PRESETS = [
-  {
-    id: 'anthropic',
-    nameKey: 'preset.anthropic',
-    protocol: 'anthropic',
-    baseUrl: 'https://api.anthropic.com',
-    model: 'claude-opus-5-5',
-    models: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1'],
-  },
-  { id: 'openai', name: 'OpenAI', protocol: 'openai', baseUrl: 'https://api.openai.com/v1' },
-  { id: 'deepseek', name: 'DeepSeek', protocol: 'openai', baseUrl: 'https://api.deepseek.com/v1' },
-  { id: 'gemini', name: 'Google Gemini', protocol: 'openai', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai' },
-  { id: 'qwen', nameKey: 'preset.qwen', protocol: 'openai', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
-  { id: 'moonshot', nameKey: 'preset.moonshot', protocol: 'openai', baseUrl: 'https://api.moonshot.cn/v1' },
-  { id: 'zhipu', nameKey: 'preset.zhipu', protocol: 'openai', baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
-  { id: 'siliconflow', nameKey: 'preset.siliconflow', protocol: 'openai', baseUrl: 'https://api.siliconflow.cn/v1' },
-  { id: 'openrouter', name: 'OpenRouter', protocol: 'openai', baseUrl: 'https://openrouter.ai/api/v1' },
-  { id: 'ollama', nameKey: 'preset.ollama', protocol: 'openai', baseUrl: 'http://127.0.0.1:11434/v1' },
-  { id: 'custom', nameKey: 'preset.custom', protocol: 'openai', baseUrl: '' },
-  { id: 'custom-anthropic', nameKey: 'preset.customAnthropic', protocol: 'anthropic', baseUrl: '' },
-];
-
-const presetName = (p) => (p.nameKey ? t(p.nameKey) : p.name);
 
 const LANGS = ['简体中文', '繁體中文', 'English', '日本語', '한국어', 'Français', 'Deutsch', 'Español', 'Русский'];
 const EFFORTS = ['auto', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -52,6 +30,8 @@ export async function openSettings({ section } = {}) {
   }
   const llm = settings.llm;
   const prefs = settings.prefs;
+  // Every saved provider (keys stay on the server; these carry a masked preview).
+  let providers = settings.providers || {};
 
   const scrim = h('div', { class: 'scrim' });
   const body = h('div', { class: 'modal-body' });
@@ -77,7 +57,15 @@ export async function openSettings({ section } = {}) {
   cancelBtn.addEventListener('click', close);
 
   // ---- AI service ----
-  const presetSel = select(PRESETS.map((p) => [p.id, presetName(p)]), PRESETS.some((p) => p.id === llm.preset) ? llm.preset : 'custom');
+  const presetSel = h('select', { class: 'input' });
+  const fillPresets = () => {
+    const value = presetSel.value || (PRESETS.some((p) => p.id === llm.preset) ? llm.preset : 'custom');
+    presetSel.replaceChildren(
+      ...PRESETS.map((p) => h('option', { value: p.id, text: presetLabel(p.id) + (providers[p.id]?.hasKey ? t('settings.savedMark') : '') })),
+    );
+    presetSel.value = value;
+  };
+  fillPresets();
   const baseInput = h('input', { class: 'input', type: 'url', value: llm.baseUrl || '', placeholder: 'https://…/v1', autocomplete: 'off', spellcheck: 'false' });
   const keyInput = h('input', {
     class: 'input',
@@ -89,6 +77,7 @@ export async function openSettings({ section } = {}) {
   const keyToggle = iconButton('eye', { title: t('settings.showHide') });
   keyToggle.addEventListener('click', () => (keyInput.type = keyInput.type === 'password' ? 'text' : 'password'));
   const keyHint = h('div', { class: 'hint', text: t('settings.keyHint') });
+  const forgetBtn = h('button', { class: 'link-btn', type: 'button', text: t('settings.forgetKey') });
   const modelInput = h('input', { class: 'input', type: 'text', value: llm.model || '', placeholder: t('settings.modelName'), autocomplete: 'off', spellcheck: 'false' });
   const modelPick = h('select', { class: 'input', hidden: true, 'aria-label': t('settings.pickModelAria') });
   const fetchBtn = h('button', { class: 'btn btn-sm btn-secondary', type: 'button', text: t('settings.fetchModels') });
@@ -96,9 +85,9 @@ export async function openSettings({ section } = {}) {
   const testResult = h('div', { class: 'hint' });
   const protocolHint = h('div', { class: 'hint' });
   let protocol = llm.protocol;
-  let presetChanged = false;
 
-  // The server only ever sends the saved key to the server it was saved for.
+  // Each provider's key is only ever sent to the server it was saved for.
+  const savedFor = () => providers[presetSel.value];
   const originOf = (proto, url) => {
     try {
       return new URL(url || (proto === 'anthropic' ? 'https://api.anthropic.com' : '')).origin;
@@ -107,13 +96,32 @@ export async function openSettings({ section } = {}) {
     }
   };
   const endpointChanged = () => {
+    const saved = savedFor();
     const origin = originOf(protocol, baseInput.value.trim());
-    return presetChanged || !origin || origin !== originOf(llm.protocol, llm.baseUrl);
+    return !!saved && (!origin || origin !== originOf(saved.protocol, saved.baseUrl));
   };
-  const refreshKeyHint = () => {
-    keyHint.textContent = llm.hasKey && endpointChanged() ? t('settings.keyChanged') : t('settings.keyHint');
+  const refreshKeyField = () => {
+    const saved = savedFor();
+    keyInput.placeholder = saved?.hasKey ? t('settings.keySaved', { key: saved.keyPreview }) : t('settings.keyPaste');
+    keyHint.textContent = saved?.hasKey && endpointChanged() ? t('settings.keyChanged') : t('settings.keyHint');
+    forgetBtn.hidden = !saved?.hasKey;
   };
-  baseInput.addEventListener('input', refreshKeyHint);
+  baseInput.addEventListener('input', refreshKeyField);
+  forgetBtn.addEventListener('click', async () => {
+    const id = presetSel.value;
+    const name = presetLabel(id, savedFor());
+    if (!(await confirmDialog({ title: t('settings.forgetKeyTitle', { name }), okText: t('common.delete'), danger: true }))) return;
+    try {
+      const fresh = await api.saveSettings({ forgetKey: id });
+      setSettingsCache(fresh);
+      providers = fresh.providers || {};
+      fillPresets();
+      refreshKeyField();
+      toast(t('settings.keyRemoved'));
+    } catch (err) {
+      toast(err.message, { type: 'error' });
+    }
+  });
 
   const showModelOptions = (models) => {
     modelPick.replaceChildren(h('option', { value: '', text: t('settings.pickModel', { n: models.length }) }), ...models.map((m) => h('option', { value: m, text: m })));
@@ -132,14 +140,19 @@ export async function openSettings({ section } = {}) {
     tempField.hidden = protocol === 'anthropic';
   };
 
+  // Choosing a provider brings back what was saved for it, or the preset's defaults.
   presetSel.addEventListener('change', () => {
     const p = PRESETS.find((x) => x.id === presetSel.value);
-    presetChanged = presetSel.value !== llm.preset;
-    protocol = p.protocol;
-    if (p.baseUrl || !p.id.startsWith('custom')) baseInput.value = p.baseUrl;
-    modelInput.value = p.model || '';
+    const saved = savedFor();
+    protocol = saved?.protocol || p.protocol;
+    if (saved) baseInput.value = saved.baseUrl;
+    else if (p.baseUrl || !p.id.startsWith('custom')) baseInput.value = p.baseUrl;
+    modelInput.value = saved?.model || p.model || '';
+    tempInput.value = saved?.temperature ?? '';
+    maxTokInput.value = saved?.maxTokens ?? '';
+    keyInput.value = '';
     showModelOptions(p.models || []);
-    refreshKeyHint();
+    refreshKeyField();
     testResult.textContent = '';
     refreshProtocol();
   });
@@ -224,6 +237,21 @@ export async function openSettings({ section } = {}) {
   }
   const htmlSwitch = h('input', { type: 'checkbox' });
   htmlSwitch.checked = prefs.preferHtml !== false;
+  // Per-device reading options take effect right away.
+  const deviceSwitch = (key, label, hint) => {
+    const input = h('input', { type: 'checkbox' });
+    input.checked = !!local.get(key, false);
+    input.addEventListener('change', () => {
+      local.set(key, input.checked);
+      document.dispatchEvent(new CustomEvent('readerprefs'));
+    });
+    return h(
+      'div',
+      { class: 'switch-row' },
+      h('div', {}, h('div', { text: label }), h('div', { class: 'hint', text: hint })),
+      h('label', { class: 'switch' }, input, h('span')),
+    );
+  };
 
   // ---- account ----
   const oldPw = h('input', { class: 'input', type: 'password', placeholder: t('settings.currentPassword'), autocomplete: 'current-password' });
@@ -270,7 +298,7 @@ export async function openSettings({ section } = {}) {
     field(t('settings.provider'), presetSel),
     protocolHint,
     field(t('settings.baseUrl'), baseInput),
-    h('div', { class: 'field' }, h('label', { text: 'API Key' }), h('div', { class: 'field-row' }, keyInput, keyToggle), keyHint),
+    h('div', { class: 'field' }, h('label', { text: 'API Key' }), h('div', { class: 'field-row' }, keyInput, keyToggle), keyHint, forgetBtn),
     h('div', { class: 'field' }, h('label', { text: t('settings.model') }), h('div', { class: 'field-row' }, modelInput, fetchBtn), modelPick),
     h('div', { class: 'field' }, h('div', { class: 'field-row' }, testBtn), testResult),
   );
@@ -303,6 +331,8 @@ export async function openSettings({ section } = {}) {
       h('div', {}, h('div', { text: t('settings.preferHtml') }), h('div', { class: 'hint', text: t('settings.preferHtmlHint') })),
       h('label', { class: 'switch' }, htmlSwitch, h('span')),
     ),
+    deviceSwitch('instantTranslate', t('reader.instant'), t('settings.instantHint')),
+    deviceSwitch('barPinned', t('reader.pinBar'), t('settings.pinBarHint')),
   );
   const accountGroup = h(
     'section',
@@ -315,6 +345,7 @@ export async function openSettings({ section } = {}) {
   );
   body.append(uiGroup, aiGroup, answerGroup, advanced, readGroup, accountGroup);
   refreshProtocol();
+  refreshKeyField();
   if (llm.preset === 'anthropic') showModelOptions(PRESETS[0].models);
 
   saveBtn.addEventListener('click', async () => {
@@ -330,7 +361,6 @@ export async function openSettings({ section } = {}) {
       effort,
     };
     if (keyInput.value.trim()) llmPatch.apiKey = keyInput.value.trim();
-    else if (endpointChanged()) llmPatch.clearKey = true;
     saveBtn.disabled = true;
     try {
       const saved = await api.saveSettings({

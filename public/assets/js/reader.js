@@ -3,7 +3,9 @@ import { AiPanel } from './aipanel.js';
 import { startCapture } from './capture.js';
 import { HtmlView } from './htmlview.js';
 import { icon } from './icons.js';
+import { InstantTranslate } from './instant.js';
 import { PdfView } from './pdfview.js';
+import { canSwitchProvider, openProviderMenu, usableProviders } from './providers.js';
 import { SelectionBar } from './selection.js';
 import { openSettings } from './settings.js';
 import {
@@ -16,6 +18,7 @@ import {
   isCoarse,
   isDarkTheme,
   local,
+  menuSwitch,
   openMenu,
   toast,
 } from './ui.js';
@@ -83,6 +86,10 @@ class Reader {
     this.quietScrollUntil = 0;
     this.saveProgress = debounce(() => this.persistProgress(false), 1500);
     this.listeners = [];
+    // Per-device reading options.
+    this.tocPinned = local.get('tocPinned', false);
+    this.barPinned = local.get('barPinned', false);
+    this.instantOn = local.get('instantTranslate', false);
   }
 
   on(target, type, fn, opts) {
@@ -119,8 +126,10 @@ class Reader {
     this.fab = h('button', { class: 'fab', type: 'button', 'aria-label': t('reader.ai'), html: icon('sparkles') }, this.badge);
     this.fab.addEventListener('click', () => this.panel?.toggle());
     this.stage = h('div', { class: 'reader-stage' }, this.viewHost, this.topbar, this.loading, this.pill, this.fab);
-    this.root = h('div', { class: 'reader' }, this.stage);
+    this.root = h('div', { class: `reader${this.tocPinned ? ' toc-pinned' : ''}` }, this.stage);
     this.host.append(this.root);
+    // The pinned contents frame is there from the start; it fills in once the paper opens.
+    if (this.tocPinned) this.renderTocSide();
   }
 
   async init() {
@@ -147,16 +156,34 @@ class Reader {
         this.root.classList.toggle('panel-open', open);
         if (open) this.setChrome(true);
       },
-      onHeightChange: (px) => this.selbar?.setOffset(px),
+      onHeightChange: (px) => {
+        this.selbar?.setOffset(px);
+        this.instant?.setOffset(px);
+      },
       openSettings: () => openSettings({ section: 'ai' }),
       jumpTo: (loc) => this.jumpToLocation(loc),
     });
     this.panel.onCountChange = (n) => this.updateBadge(n);
+    this.instant = new InstantTranslate({
+      paper: this.paper,
+      onAction: (act, info) => this.panel.startQuote(act, info),
+      onContinue: (thread) => this.panel.adoptThread(thread),
+      onVisibility: (v) => this.root.classList.toggle('selecting', v),
+      openSettings: () => openSettings({ section: 'ai' }),
+    });
     this.selbar = new SelectionBar({
       describe: (sel) => (this.capture ? null : this.view?.describeSelection(sel) || null),
       onAction: (act, info) => this.onSelectionAction(act, info),
       onVisibility: (v) => this.root.classList.toggle('selecting', v),
+      instant: () => this.instantOn,
+      onInstant: (info) => this.instant.show(info),
     });
+    // The same options can be changed in Settings while a paper is open.
+    this.on(document, 'readerprefs', () => {
+      this.setBarPinned(local.get('barPinned', false), { save: false });
+      this.setInstant(local.get('instantTranslate', false), { save: false });
+    });
+    this.on(window, 'resize', () => this.scheduleTocCurrent());
 
     this.pdfInvert = local.get('pdfInvert', true);
     this.on(document, 'themechange', () => this.updateInvert());
@@ -210,7 +237,10 @@ class Reader {
     this.switching = true;
     this.capture?.cancel();
     this.closePeek();
+    this.instant?.close();
     this.backChip?.remove();
+    this.tocItems = null;
+    this.tocSide?.querySelector('.drawer-body')?.replaceChildren();
     clearTimeout(this.pillTimer);
     this.pill.classList.remove('show');
     this.persistProgress(false);
@@ -257,6 +287,7 @@ class Reader {
       this.hideLoading();
       this.quietScrollUntil = Date.now() + 1200;
       this.paper.progress = { ...(this.paper.progress || {}), mode };
+      if (this.tocPinned) this.renderTocSide();
       if (mode === 'pdf') this.afterPdfOpen(view);
       if (mode === 'html' && !initial) this.saveProgress();
     } catch (err) {
@@ -306,7 +337,21 @@ class Reader {
   // ---- chrome, loading, progress ----
 
   setChrome(visible) {
+    if (!visible && this.barPinned) return;
     this.root.classList.toggle('chrome-hidden', !visible);
+  }
+
+  setBarPinned(on, { save = true } = {}) {
+    this.barPinned = on;
+    if (save) local.set('barPinned', on);
+    if (on) this.setChrome(true);
+  }
+
+  setInstant(on, { save = true } = {}) {
+    if (on && save && !this.instantOn) toast(t('reader.instantOn'));
+    this.instantOn = on;
+    if (save) local.set('instantTranslate', on);
+    if (!on) this.instant?.close();
   }
 
   handleScroll(top) {
@@ -318,10 +363,12 @@ class Reader {
       else if (d > 10) this.setChrome(false);
       else if (d < -14) this.setChrome(true);
     }
+    this.scheduleTocCurrent();
     this.saveProgress();
   }
 
   showPage(n, total) {
+    this.scheduleTocCurrent();
     this.pill.textContent = `${n} / ${total}`;
     this.pill.classList.add('show');
     clearTimeout(this.pillTimer);
@@ -572,9 +619,23 @@ class Reader {
     document.body.append(box);
   }
 
-  // ---- drawers & menus ----
+  // ---- table of contents ----
 
-  async openToc() {
+  // Pinned, the contents sit beside the text; that needs a window at least this wide.
+  canPinToc() {
+    return window.matchMedia('(min-width: 760px)').matches;
+  }
+
+  tocSideShown() {
+    return this.tocPinned && this.canPinToc();
+  }
+
+  openToc() {
+    // With the pinned list on screen, the toolbar button puts it away.
+    if (this.tocSideShown()) {
+      this.setTocPinned(false);
+      return;
+    }
     const view = this.view;
     if (!view) return;
     const scrim = h('div', { class: 'scrim' });
@@ -585,7 +646,60 @@ class Reader {
       drawer.remove();
     };
     scrim.addEventListener('click', close);
-    drawer.append(h('div', { class: 'drawer-head' }, h('span', { class: 'title', text: t('reader.toc') }), iconButton('close', { title: t('common.close'), onClick: close })), body);
+    const pin = this.canPinToc()
+      ? iconButton('pushpin', {
+          title: t('reader.pinToc'),
+          onClick: () => {
+            close();
+            this.setTocPinned(true);
+          },
+        })
+      : null;
+    drawer.append(h('div', { class: 'drawer-head' }, h('span', { class: 'title', text: t('reader.toc') }), pin, iconButton('close', { title: t('common.close'), onClick: close })), body);
+    this.root.append(scrim, drawer);
+    this.fillToc(body, view, close);
+  }
+
+  setTocPinned(on) {
+    this.tocPinned = on;
+    local.set('tocPinned', on);
+    this.root.classList.toggle('toc-pinned', on);
+    if (on) {
+      this.renderTocSide();
+    } else {
+      this.tocSide?.remove();
+      this.tocSide = null;
+      this.tocItems = null;
+    }
+  }
+
+  renderTocSide() {
+    this.tocSide?.remove();
+    const body = h('div', { class: 'drawer-body' });
+    this.tocSide = h(
+      'nav',
+      { class: 'toc-side', 'aria-label': t('reader.toc') },
+      h(
+        'div',
+        { class: 'drawer-head' },
+        h('span', { class: 'title', text: t('reader.toc') }),
+        iconButton('pushpin', { title: t('reader.unpinToc'), className: 'on', onClick: () => this.setTocPinned(false) }),
+      ),
+      body,
+    );
+    this.root.append(this.tocSide);
+    const view = this.view;
+    if (!view) return;
+    this.fillToc(body, view, null).then((items) => {
+      if (this.view !== view || !this.tocSide?.contains(body)) return;
+      this.tocItems = items;
+      this.tocCurrent = null;
+      this.updateTocCurrent();
+    });
+  }
+
+  // Fills a contents list. `done` runs after a jump (closes the drawer); the pinned list stays.
+  async fillToc(body, view, done) {
     if (view.kind === 'pdf') {
       const input = h('input', {
         class: 'input',
@@ -599,34 +713,70 @@ class Reader {
       const go = h('button', { class: 'btn btn-sm btn-secondary', type: 'button', text: t('reader.jump') });
       const jump = () => {
         view.goToPage(Number(input.value) || 1);
-        close();
+        done?.();
       };
       go.addEventListener('click', jump);
       input.addEventListener('keydown', (e) => e.key === 'Enter' && jump());
       body.append(h('div', { class: 'page-jump' }, h('span', { text: t('reader.pageWord') }), input, h('span', { text: t('reader.pageOf', { n: view.numPages }) }), go));
     }
-    this.root.append(scrim, drawer);
     let items = [];
     try {
       items = await view.getOutline();
     } catch {
       items = [];
     }
+    if (this.view !== view) return [];
     if (!items.length) {
       body.append(h('div', { class: 'toc-empty', text: view.kind === 'pdf' ? t('reader.noOutlinePdf') : t('reader.noOutlineHtml') }));
-      return;
+      return [];
     }
+    const out = [];
     for (const it of items) {
       if (view.kind === 'pdf' && !it.dest) continue;
-      const btn = h('button', { class: `toc-item l${it.level}`, type: 'button', text: it.title });
+      const btn = h('button', { class: `toc-item l${it.level}`, type: 'button' }, it.page ? h('span', { class: 'pg', text: String(it.page) }) : null, it.title);
       btn.addEventListener('click', () => {
-        close();
+        done?.();
         if (view.kind === 'pdf') view.goToDestDirect(it.dest);
         else view.jumpTo(it.el);
       });
       body.append(btn);
+      out.push({ ...it, btn });
     }
+    return out;
   }
+
+  scheduleTocCurrent() {
+    if (!this.tocItems || this.tocFrame) return;
+    this.tocFrame = requestAnimationFrame(() => {
+      this.tocFrame = 0;
+      this.updateTocCurrent();
+    });
+  }
+
+  // Marks the section being read in the pinned list.
+  updateTocCurrent() {
+    const view = this.view;
+    if (!this.tocItems?.length || !view || !this.tocSideShown()) return;
+    let current = null;
+    if (view.kind === 'pdf') {
+      const page = view.currentPage;
+      for (const it of this.tocItems) if (it.page && it.page <= page && (!current || it.page >= current.page)) current = it;
+    } else {
+      const line = view.scrollEl.getBoundingClientRect().top + view.topInset() + 24;
+      // Entries come in document order.
+      for (const it of this.tocItems) {
+        if (it.el.getBoundingClientRect().top > line) break;
+        current = it;
+      }
+    }
+    if (current === this.tocCurrent) return;
+    this.tocCurrent?.btn.classList.remove('current');
+    current?.btn.classList.add('current');
+    this.tocCurrent = current;
+    current?.btn.scrollIntoView({ block: 'nearest' });
+  }
+
+  // ---- menu ----
 
   openMore() {
     const view = this.view;
@@ -676,6 +826,17 @@ class Reader {
       },
     });
     items.push('sep');
+    items.push({ el: menuSwitch({ icon: 'pushpin', label: t('reader.pinBar'), checked: this.barPinned, onChange: (on) => this.setBarPinned(on) }) });
+    items.push({ el: menuSwitch({ icon: 'translate', label: t('reader.instant'), checked: this.instantOn, onChange: (on) => this.setInstant(on) }) });
+    if (canSwitchProvider()) {
+      items.push({
+        icon: 'repeat',
+        label: t('reader.provider'),
+        right: usableProviders().find((p) => p.active)?.label || '',
+        onClick: () => openProviderMenu(this.moreBtn, { openSettings: () => openSettings({ section: 'ai' }) }),
+      });
+    }
+    items.push('sep');
     items.push({ icon: 'sparkles', label: t('reader.askPaper'), onClick: () => this.panel.startChat() });
     items.push({ icon: 'clock', label: t('reader.history'), onClick: () => this.panel.showHistory() });
     items.push('sep');
@@ -707,7 +868,9 @@ class Reader {
     closeMenus();
     clearTimeout(this.pillTimer);
     clearTimeout(this.backTimer);
+    cancelAnimationFrame(this.tocFrame);
     this.view?.destroy();
+    this.instant?.destroy();
     this.panel?.destroy();
     this.selbar?.destroy();
     for (const off of this.listeners) off();

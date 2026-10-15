@@ -506,6 +506,18 @@ export class PdfView {
       }
     };
     walk(outline, 1);
+    // Page numbers, shown in the list and used to highlight the section being read.
+    await Promise.all(
+      flat.map(async (item) => {
+        try {
+          const dest = typeof item.dest === 'string' ? await this.pdf.getDestination(item.dest) : item.dest;
+          const ref = dest?.[0];
+          if (ref != null) item.page = (typeof ref === 'object' ? await this.pdf.getPageIndex(ref) : ref) + 1;
+        } catch {
+          // leave this entry without a page
+        }
+      }),
+    );
     return flat;
   }
 

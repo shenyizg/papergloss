@@ -38,10 +38,13 @@ const ACTIONS = [
 
 export class SelectionBar {
   // describe(selection) -> info object or null when the selection is outside the reading area.
-  constructor({ describe, onAction, onVisibility }) {
+  // While instant() is true the bar stays hidden and onInstant(info) receives each selection.
+  constructor({ describe, onAction, onVisibility, instant, onInstant }) {
     this.describe = describe;
     this.onAction = onAction;
     this.onVisibility = onVisibility;
+    this.instant = instant;
+    this.onInstant = onInstant;
     this.info = null;
     this.visible = false;
     this.el = h('div', { class: 'selbar', role: 'toolbar', 'aria-label': t('sel.toolbar') });
@@ -60,9 +63,24 @@ export class SelectionBar {
 
     this.onSelChange = () => {
       clearTimeout(this.timer);
-      this.timer = setTimeout(() => this.update(), isCoarse() ? 260 : 120);
+      // On touch screens a selection is adjusted by dragging its handles; give instant
+      // translation a moment so it doesn't start on a half-made selection.
+      const delay = isCoarse() ? (this.instant?.() ? 600 : 260) : 120;
+      this.timer = setTimeout(() => this.update(), delay);
     };
     document.addEventListener('selectionchange', this.onSelChange);
+    // A mouse selection is finished when the button comes up.
+    this.onPointerDown = (e) => {
+      if (e.pointerType === 'mouse' && e.button === 0) this.mouseDown = true;
+    };
+    this.onPointerUp = () => {
+      if (!this.mouseDown) return;
+      this.mouseDown = false;
+      this.onSelChange();
+    };
+    document.addEventListener('pointerdown', this.onPointerDown, true);
+    document.addEventListener('pointerup', this.onPointerUp, true);
+    window.addEventListener('blur', this.onPointerUp);
     this.onScroll = () => {
       if (this.visible && this.el.classList.contains('floating')) this.position();
     };
@@ -70,6 +88,7 @@ export class SelectionBar {
   }
 
   update() {
+    if (this.mouseDown) return;
     const sel = document.getSelection();
     const text = sel && !sel.isCollapsed ? sel.toString() : '';
     let info = null;
@@ -83,6 +102,11 @@ export class SelectionBar {
     }
     if (info && info.text) {
       this.info = info;
+      if (this.instant?.()) {
+        this.hide();
+        this.onInstant?.(info);
+        return;
+      }
       this.show();
     } else {
       // Delay so a tap on the bar (which may clear the selection on iOS) still lands.
@@ -144,6 +168,9 @@ export class SelectionBar {
     clearTimeout(this.timer);
     clearTimeout(this.hideTimer);
     document.removeEventListener('selectionchange', this.onSelChange);
+    document.removeEventListener('pointerdown', this.onPointerDown, true);
+    document.removeEventListener('pointerup', this.onPointerUp, true);
+    window.removeEventListener('blur', this.onPointerUp);
     window.removeEventListener('scroll', this.onScroll, true);
     this.el.remove();
   }

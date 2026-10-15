@@ -12,18 +12,22 @@ const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 
 const ACTIONS = ['translate', 'explain', 'ask', 'chat'];
 
-export const DEFAULT_LLM = {
+// One saved connection per provider (the presets in the settings form), each with its own
+// API key. `preset` names the one in use.
+const DEFAULT_PROVIDER = {
   protocol: 'anthropic',
-  preset: 'anthropic',
   baseUrl: 'https://api.anthropic.com',
   apiKey: '',
   model: 'claude-opus-5-5',
   // Only sent to OpenAI-compatible providers, and only when set.
   temperature: null,
   maxTokens: null,
-  // Claude effort per action; "auto" leaves the model default.
-  effort: { translate: 'low', explain: 'medium', ask: 'medium', chat: 'medium' },
 };
+// Claude effort per action; "auto" leaves the model default.
+const DEFAULT_EFFORT = { translate: 'low', explain: 'medium', ask: 'medium', chat: 'medium' };
+
+const PROVIDER_ID_RE = /^[a-z0-9-]{1,40}$/;
+const validProviderId = (id) => typeof id === 'string' && PROVIDER_ID_RE.test(id);
 
 export const DEFAULT_PREFS = {
   targetLang: '简体中文',
@@ -36,9 +40,37 @@ let config = null;
 // The hash kept on disk. With PAPERGLOSS_PASSWORD set, the one in use lives only in memory.
 let storedHash = '';
 
+function normalizeProvider(p = {}) {
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  return {
+    protocol: p.protocol === 'anthropic' ? 'anthropic' : 'openai',
+    baseUrl: typeof p.baseUrl === 'string' ? p.baseUrl : '',
+    apiKey: typeof p.apiKey === 'string' ? p.apiKey : '',
+    model: typeof p.model === 'string' ? p.model : '',
+    temperature: num(p.temperature),
+    maxTokens: num(p.maxTokens),
+  };
+}
+
+function normalizeLlm(raw = {}) {
+  const effort = { ...DEFAULT_EFFORT, ...(raw.effort || {}) };
+  const providers = {};
+  if (raw.providers && typeof raw.providers === 'object') {
+    for (const [id, p] of Object.entries(raw.providers)) if (validProviderId(id)) providers[id] = normalizeProvider(p);
+  } else if (raw.protocol || raw.baseUrl || raw.apiKey || raw.model) {
+    // Earlier versions kept a single provider directly in `llm`.
+    providers[validProviderId(raw.preset) ? raw.preset : 'anthropic'] = normalizeProvider({ ...DEFAULT_PROVIDER, ...raw });
+  }
+  let preset = validProviderId(raw.preset) && providers[raw.preset] ? raw.preset : Object.keys(providers)[0];
+  if (!preset) {
+    preset = 'anthropic';
+    providers.anthropic = normalizeProvider(DEFAULT_PROVIDER);
+  }
+  return { preset, effort, providers };
+}
+
 function normalize(raw = {}) {
-  const llm = { ...DEFAULT_LLM, ...(raw.llm || {}) };
-  llm.effort = { ...DEFAULT_LLM.effort, ...(raw.llm?.effort || {}) };
+  const llm = normalizeLlm(raw.llm || {});
   const prefs = { ...DEFAULT_PREFS, ...(raw.prefs || {}) };
   prefs.prompts = { ...DEFAULT_PREFS.prompts, ...(raw.prefs?.prompts || {}) };
   return {
@@ -107,10 +139,17 @@ function maskKey(key) {
   return `${key.slice(0, 5)}…${key.slice(-4)}`;
 }
 
+// Keys never leave the server; the browser gets a masked preview.
+function publicProvider({ apiKey, ...rest }) {
+  return { ...rest, hasKey: !!apiKey, keyPreview: maskKey(apiKey) };
+}
+
 export function publicSettings() {
-  const { apiKey, ...llm } = config.llm;
+  const { preset, effort, providers } = config.llm;
   return {
-    llm: { ...llm, hasKey: !!apiKey, keyPreview: maskKey(apiKey) },
+    // The provider in use, flattened as before; `providers` lists every saved one.
+    llm: { preset, effort, ...publicProvider(providers[preset]) },
+    providers: Object.fromEntries(Object.entries(providers).map(([id, p]) => [id, publicProvider(p)])),
     prefs: config.prefs,
     passwordFromEnv: !!process.env.PAPERGLOSS_PASSWORD,
   };
@@ -123,7 +162,7 @@ const normalizeBaseUrl = (url) => url.trim().replace(/\/+$/, '');
 // A saved API key belongs to the server it was saved for (scheme, host and port).
 function endpointOrigin(protocol, baseUrl) {
   try {
-    return new URL(baseUrl || (protocol === 'anthropic' ? DEFAULT_LLM.baseUrl : '')).origin;
+    return new URL(baseUrl || (protocol === 'anthropic' ? DEFAULT_PROVIDER.baseUrl : '')).origin;
   } catch {
     return '';
   }
@@ -135,31 +174,37 @@ function sameEndpoint(a, b) {
 }
 
 export async function updateSettings(patch = {}) {
+  const llm = config.llm;
   if (patch.llm) {
+    // Updates one provider (the one named by `preset`, else the current one) and switches to it.
     const l = patch.llm;
-    const llm = config.llm;
-    const before = { protocol: llm.protocol, baseUrl: llm.baseUrl };
-    if (typeof l.protocol === 'string' && ['anthropic', 'openai'].includes(l.protocol)) llm.protocol = l.protocol;
-    if (typeof l.preset === 'string') llm.preset = l.preset.slice(0, 40);
-    if (typeof l.baseUrl === 'string') llm.baseUrl = normalizeBaseUrl(l.baseUrl);
-    if (typeof l.model === 'string') llm.model = l.model.trim();
-    if (typeof l.apiKey === 'string' && l.apiKey.trim()) llm.apiKey = l.apiKey.trim();
-    else if (!sameEndpoint(before, llm)) llm.apiKey = '';
-    if (l.clearKey === true) llm.apiKey = '';
+    const id = validProviderId(l.preset) ? l.preset : llm.preset;
+    const p = llm.providers[id] || normalizeProvider({ protocol: l.protocol, baseUrl: '', model: '' });
+    const before = { protocol: p.protocol, baseUrl: p.baseUrl };
+    if (l.protocol === 'anthropic' || l.protocol === 'openai') p.protocol = l.protocol;
+    if (typeof l.baseUrl === 'string') p.baseUrl = normalizeBaseUrl(l.baseUrl);
+    if (typeof l.model === 'string') p.model = l.model.trim();
+    if (typeof l.apiKey === 'string' && l.apiKey.trim()) p.apiKey = l.apiKey.trim();
+    // A key never follows its provider entry to another server.
+    else if (!sameEndpoint(before, p)) p.apiKey = '';
+    if (l.clearKey === true) p.apiKey = '';
     if ('temperature' in l) {
       const t = l.temperature === '' || l.temperature === null ? null : Number(l.temperature);
-      llm.temperature = Number.isFinite(t) ? Math.min(2, Math.max(0, t)) : null;
+      p.temperature = Number.isFinite(t) ? Math.min(2, Math.max(0, t)) : null;
     }
     if ('maxTokens' in l) {
       const m = l.maxTokens === '' || l.maxTokens === null ? null : Math.round(Number(l.maxTokens));
-      llm.maxTokens = Number.isFinite(m) && m > 0 ? m : null;
+      p.maxTokens = Number.isFinite(m) && m > 0 ? m : null;
     }
+    llm.providers[id] = p;
+    llm.preset = id;
     if (l.effort && typeof l.effort === 'object') {
       for (const a of ACTIONS) {
         if (EFFORTS.has(l.effort[a])) llm.effort[a] = l.effort[a];
       }
     }
   }
+  if (validProviderId(patch.forgetKey) && llm.providers[patch.forgetKey]) llm.providers[patch.forgetKey].apiKey = '';
   if (patch.prefs) {
     const p = patch.prefs;
     const prefs = config.prefs;
@@ -184,20 +229,23 @@ export async function setPassword(newPassword) {
   await saveConfig();
 }
 
-// Builds the effective LLM config for one request: saved settings, optionally
-// overridden by unsaved values from the settings form (used by "test" / "list models").
+// Builds the effective LLM config for one request: the provider in use, or, for "test" /
+// "list models" in the settings form, the provider shown there with its unsaved edits.
 export function effectiveLlm(override) {
-  const base = { ...config.llm, effort: { ...config.llm.effort } };
+  const { preset, effort, providers } = config.llm;
+  const id = override && validProviderId(override.preset) && providers[override.preset] ? override.preset : preset;
+  const saved = providers[id];
+  const base = { preset: id, ...saved, effort: { ...effort } };
   if (!override) return base;
   if (override.protocol === 'anthropic' || override.protocol === 'openai') base.protocol = override.protocol;
   if (typeof override.baseUrl === 'string') base.baseUrl = normalizeBaseUrl(override.baseUrl);
   if (typeof override.model === 'string' && override.model.trim()) base.model = override.model.trim();
   if (typeof override.apiKey === 'string' && override.apiKey.trim()) {
     base.apiKey = override.apiKey.trim();
-  } else if (!sameEndpoint(base, config.llm)) {
-    // Never send the saved key to a server the user is only trying out.
+  } else if (!sameEndpoint(base, saved)) {
+    // Never send a saved key to a server the user is only trying out.
     base.apiKey = '';
-    base.keyWithheld = !!config.llm.apiKey;
+    base.keyWithheld = !!saved.apiKey;
   }
   return base;
 }

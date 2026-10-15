@@ -43,6 +43,10 @@ const PATHS = {
   image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/>',
   arrowUp: '<path d="M12 19V5M5 12l7-7 7 7"/>',
   pin: '<path d="M12 22s-8-4.5-8-11.8A8 8 0 0 1 12 2a8 8 0 0 1 8 8.2c0 7.3-8 11.8-8 11.8z"/><circle cx="12" cy="10" r="3"/>',
+  pushpin: '<path d="M9 3h6M10 3v6l-3 3v2h10v-2l-3-3V3M12 14v7"/>',
+  repeat: '<path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
+  // Keeps menu labels aligned where an item has no icon.
+  blank: '',
 };
 
 export function icon(name, size) {

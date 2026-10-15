@@ -113,6 +113,19 @@ export function openMenu(anchor, items, { align = 'right' } = {}) {
   return menu;
 }
 
+// A menu row with an on/off switch; the menu stays open while it's toggled.
+export function menuSwitch({ icon: name, label, checked, onChange }) {
+  const input = h('input', { type: 'checkbox' });
+  input.checked = !!checked;
+  input.addEventListener('change', () => onChange(input.checked));
+  return h(
+    'label',
+    { class: 'menu-row menu-switch' },
+    h('span', { class: 'label' }, iconEl(name), h('span', { text: label })),
+    h('span', { class: 'switch' }, input, h('span')),
+  );
+}
+
 export function closeMenus() {
   document.querySelectorAll('.menu, .menu-scrim').forEach((e) => e.remove());
 }

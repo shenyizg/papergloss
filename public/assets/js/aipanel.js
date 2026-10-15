@@ -9,6 +9,7 @@ import {
 } from './ai.js';
 import { renderMarkdown } from './markdown.js';
 import { icon } from './icons.js';
+import { canSwitchProvider, openProviderMenu } from './providers.js';
 import { confirmDialog, copyText, h, iconButton, isWide, timeAgo, toast } from './ui.js';
 // `t` is used for threads throughout this file, so the translator is `tr`.
 import { formatLocation, t as tr } from './i18n.js';
@@ -237,6 +238,17 @@ export class AiPanel {
     this.thread.pendingFullText = this.loadFullText(prefs);
   }
 
+  // A conversation started elsewhere (the translate-on-select popup) continues here.
+  adoptThread(thread) {
+    if (this.controller) this.stop();
+    this.thread = thread;
+    this.view = 'thread';
+    this.open();
+    this.render();
+    this.persist(thread);
+    if (isWide()) this.input.focus();
+  }
+
   async loadFullText(prefs) {
     const view = this.getView();
     if (!view) return { text: '', truncated: false };
@@ -458,7 +470,14 @@ export class AiPanel {
       if (['no_key', 'no_model', 'no_base_url'].includes(m.errorCode)) {
         box.append(h('div', {}, h('button', { class: 'btn btn-sm btn-secondary', onClick: () => this.openSettings?.() }, tr('ai.openSettings'))));
       } else if (m.errorCode !== 'refusal' && !m.stopped) {
-        box.append(h('div', {}, h('button', { class: 'btn btn-sm btn-secondary', onClick: () => this.retry(m) }, tr('common.retry'))));
+        const actions = h('div', { class: 'msg-error-actions' }, h('button', { class: 'btn btn-sm btn-secondary', onClick: () => this.retry(m) }, tr('common.retry')));
+        // A provider that is down or out of quota: retry the same question with another saved one.
+        if (canSwitchProvider()) {
+          const btn = h('button', { class: 'btn btn-sm btn-secondary', type: 'button', text: tr('ai.switchProvider') });
+          btn.addEventListener('click', () => openProviderMenu(btn, { onSwitched: () => this.retry(m), openSettings: this.openSettings }));
+          actions.append(btn);
+        }
+        box.append(actions);
       }
       el.append(box);
     }
